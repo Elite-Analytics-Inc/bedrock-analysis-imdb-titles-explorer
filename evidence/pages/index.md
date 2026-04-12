@@ -9,7 +9,7 @@ Explore genre trends, ratings, and production history across IMDB's title catalo
 ## Titles by Type
 
 ```sql titles_by_type
-select * from titles_by_type order by total_titles desc
+select * from results.titles_by_type order by total_titles desc
 ```
 
 <BarChart
@@ -26,7 +26,7 @@ select * from titles_by_type order by total_titles desc
 ## 📈 Production Volume by Decade
 
 ```sql titles_per_decade
-select * from titles_per_decade order by decade
+select * from results.titles_per_decade order by decade
 ```
 
 <LineChart
@@ -42,7 +42,7 @@ select * from titles_per_decade order by decade
 ## 🎭 Top 25 Genres
 
 ```sql genre_counts
-select * from genre_counts order by total_titles desc
+select * from results.genre_counts order by total_titles desc
 ```
 
 <BarChart
@@ -60,7 +60,7 @@ select * from genre_counts order by total_titles desc
 ## 📊 Genre Trends Over Time
 
 ```sql genre_by_decade
-select * from genre_by_decade order by decade
+select * from results.genre_by_decade order by decade
 ```
 
 <LineChart
@@ -76,7 +76,7 @@ select * from genre_by_decade order by decade
 ## ⭐ Top 50 Rated Titles
 
 ```sql top_rated
-select * from top_rated order by average_rating desc, num_votes desc
+select * from results.top_rated order by average_rating desc, num_votes desc
 ```
 
 <DataTable data={top_rated} search=true />
@@ -86,7 +86,7 @@ select * from top_rated order by average_rating desc, num_votes desc
 ## 📉 Rating Distribution
 
 ```sql rating_distribution
-select * from rating_distribution order by title_type, rating_bucket
+select * from results.rating_distribution order by title_type, rating_bucket
 ```
 
 <BarChart
@@ -102,7 +102,7 @@ select * from rating_distribution order by title_type, rating_bucket
 ## ⏱️ Runtime Trends by Decade
 
 ```sql runtime_by_decade
-select * from runtime_by_decade order by decade
+select * from results.runtime_by_decade order by decade
 ```
 
 <LineChart
