@@ -1,0 +1,1 @@
+{"analysis_name":"imdb-titles-explorer","inputs":["bedrock.entertainment.imdb_titles"],"params_schema":{"min_votes":{"type":"string","default":"1000"},"start_year":{"type":"string","default":"1950"}},"resources":{"requests":{"cpu":"1","memory":"2Gi"},"limits":{"cpu":"2","memory":"4Gi"}}}
