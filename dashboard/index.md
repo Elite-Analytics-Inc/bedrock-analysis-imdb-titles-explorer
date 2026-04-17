@@ -2,6 +2,8 @@
 title: IMDB Titles Explorer
 ---
 
+# IMDB Titles Explorer
+
 ## Titles by Type
 
 ```sql titles_by_type
