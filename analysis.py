@@ -139,4 +139,5 @@ job.update_progress("running_analysis", progress_pct=95, progress_message="Final
                                  "analytics/bedrock/JOB_ID/data/rating_distribution.parquet",
                                  "analytics/bedrock/JOB_ID/data/runtime_by_decade.parquet"
                              ]})
+job.write_dashboard("dashboard/index.md")
 job.complete()

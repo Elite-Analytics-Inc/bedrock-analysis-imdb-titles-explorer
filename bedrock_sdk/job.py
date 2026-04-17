@@ -172,6 +172,33 @@ class BedrockJob:
         self.write_parquet(name, "SELECT * FROM _write_tmp")
         conn.execute("DROP TABLE IF EXISTS _write_tmp")
 
+    def write_dashboard(self, local_path: str):
+        """
+        Upload a dashboard markdown file to R2 alongside the parquet outputs.
+
+        The file lands at analytics/bedrock/<job_id>/dashboard/index.md and is
+        rendered by the Bedrock Dash framework at request time — no Evidence
+        build step needed.
+
+        Typically called at the end of analysis.py:
+            job.write_dashboard("dashboard/index.md")
+
+        Args:
+            local_path: path to the .md file relative to the analysis repo root
+        """
+        import os.path as _osp
+
+        if not _osp.isfile(local_path):
+            print(f"  [warn] dashboard file not found: {local_path}", flush=True)
+            return
+
+        # Upload as dashboard/index.md (the presign endpoint scopes to data/ prefix,
+        # so we use the dashboard/ prefix via the filename)
+        dest = "dashboard/" + _osp.basename(local_path)
+        presigned_url = self._presign_upload(dest)
+        self._upload_file(local_path, presigned_url)
+        print(f"  wrote {dest} ({_osp.getsize(local_path)} bytes)", flush=True)
+
     def fetch_url_to_home(self, url: str, filename: str = None, max_bytes: int = 10 * 1024 * 1024 * 1024) -> str:
         """
         Fetch a public HTTP(S) URL and store it in the caller's home directory
