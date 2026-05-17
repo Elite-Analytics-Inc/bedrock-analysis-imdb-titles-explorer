@@ -1,1 +1,30 @@
-{"analysis_name":"imdb-titles-explorer","inputs":["bedrock.entertainment.imdb_titles"],"params_schema":{"min_votes":{"type":"string","default":"1000"},"start_year":{"type":"string","default":"1950"}},"resources":{"requests":{"cpu":"1","memory":"2Gi"},"limits":{"cpu":"2","memory":"4Gi"}}}
+{
+  "analysis_name": "imdb-titles-explorer",
+  "inputs": ["bedrock.entertainment.imdb_titles"],
+  "params_schema": {
+    "type": "object",
+    "required": ["start_year", "min_votes"],
+    "properties": {
+      "start_year": {
+        "type": "integer",
+        "default": 1950,
+        "minimum": 1888,
+        "maximum": 2025,
+        "description": "Earliest release year to include. The IMDb catalog begins in 1888; pre-1930 entries are sparse. 1950 captures the modern feature-film era; bump to 2000+ for streaming-only views.",
+        "placeholder": "1950"
+      },
+      "min_votes": {
+        "type": "integer",
+        "default": 1000,
+        "minimum": 0,
+        "maximum": 1000000,
+        "description": "Minimum number of user votes a title must have to be included — a popularity floor that removes obscure or unverified entries. 1,000 = casually-known; 100,000+ = mainstream blockbusters.",
+        "placeholder": "1000"
+      }
+    }
+  },
+  "resources": {
+    "requests": {"cpu": "1", "memory": "2Gi"},
+    "limits":   {"cpu": "2", "memory": "4Gi"}
+  }
+}

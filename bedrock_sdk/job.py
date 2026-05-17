@@ -72,43 +72,69 @@ class BedrockJob:
 
     def fetch(self, table_name: str, sql: str):
         """
-        Query Iceberg data through the query engine (ABAC enforced).
+        Query Iceberg data through the in-pod sidecar query engine via Arrow
+        Flight (gRPC, port 7778). ABAC enforced upstream.
 
-        Executes `sql` on the query engine's HTTP /query endpoint, then registers
-        the result as a local DuckDB table named `table_name`.
+        Flight is the ONLY transport — there is no HTTP fallback. The sidecar
+        is in the same pod as this container; if Flight is unavailable, the
+        analysis fails fast rather than silently routing to the shared cluster
+        QE via HTTP (which would buffer the entire result set in Vec and OOM
+        the cluster for any large query). See onboard/docs/fundamentals/
+        live-updates-and-streaming.md for why the sidecar boundary matters.
+
+        The result lands as a local DuckDB table named `table_name`. To keep
+        the analysis container memory bounded, push aggregations into `sql`
+        (GROUP BY / WHERE / HAVING) — don't pull raw rows for local rollup.
 
         Example:
-            job.fetch("trips", "SELECT * FROM catalog.transportation.nyc_taxi_trips WHERE year = 2022")
-            result = conn.execute("SELECT COUNT(*) FROM trips").fetchone()
+            job.fetch("hourly", '''
+                SELECT EXTRACT(hour FROM ts) AS h, COUNT(*) AS n, AVG(amount) AS avg
+                FROM bedrock.transportation.nyc_taxi_trips
+                WHERE EXTRACT(year FROM ts) = 2023
+                GROUP BY h ORDER BY h
+            ''')  # → 24 rows
         """
-        import urllib.request
+        import time
 
-        payload = json.dumps({"sql": sql}).encode()
-        req = urllib.request.Request(
-            f"{self.qe_url}/query",
-            data=payload,
-            method="POST",
-            headers=self._http_headers(),
-        )
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            data = json.load(resp)
+        sql_preview = " ".join(sql.split())[:120]
+        self._emit({"type": "log", "level": "info",
+                     "message": f"[query:{table_name}] {sql_preview}{'…' if len(sql.strip()) > 120 else ''}"})
+        t0 = time.time()
 
+        arrow_table = self._fetch_flight(sql)
         conn = self._local_conn()
-        columns = data.get("columns", [])
-        rows = data.get("rows", [])
-
-        if not rows:
-            col_defs = ", ".join(f'"{c}" VARCHAR' for c in columns)
+        if arrow_table.num_rows == 0:
+            col_defs = ", ".join(f'"{f.name}" VARCHAR' for f in arrow_table.schema)
             conn.execute(f'CREATE OR REPLACE TABLE "{table_name}" ({col_defs})')
-            return
+        else:
+            conn.execute(
+                f'CREATE OR REPLACE TABLE "{table_name}" AS SELECT * FROM arrow_table'
+            )
+        elapsed = time.time() - t0
+        self._emit({"type": "log", "level": "info",
+                     "message": f"[query:{table_name}] Completed in {elapsed:.1f}s — {arrow_table.num_rows:,} rows"})
 
-        # Write JSON to temp file to avoid SQL injection from special chars.
-        import tempfile
-        tmp = os.path.join(tempfile.gettempdir(), f"_fetch_{table_name}.json")
-        with open(tmp, "w") as f:
-            json.dump(rows, f)
-        conn.execute(f'CREATE OR REPLACE TABLE "{table_name}" AS SELECT * FROM read_json_auto(\'{tmp}\')')
-        os.remove(tmp)
+    def _fetch_flight(self, sql: str):
+        """Execute SQL against the sidecar via Arrow Flight (gRPC). Returns a
+        pyarrow.Table. Raises FlightError (or pyarrow's underlying
+        FlightUnavailableError / FlightServerError) on any failure — the
+        caller does NOT swallow exceptions. We never fall back to HTTP because
+        every analysis must stay inside the sidecar boundary."""
+        import pyarrow.flight as flight
+
+        # Sidecar Flight endpoint is one port above the HTTP port (7777 → 7778).
+        grpc_host = self.qe_url.replace("http://", "").replace("https://", "")
+        host, port = grpc_host.rsplit(":", 1)
+        flight_port = int(port) + 1
+
+        client = flight.FlightClient(f"grpc://{host}:{flight_port}")
+
+        headers = [(b"authorization", f"Bearer {self.job_token}".encode())]
+        options = flight.FlightCallOptions(headers=headers)
+
+        ticket = flight.Ticket(json.dumps({"sql": sql}).encode("utf-8"))
+        reader = client.do_get(ticket, options)
+        return reader.read_all()
 
     def execute(self, sql: str):
         """
@@ -174,17 +200,17 @@ class BedrockJob:
 
     def write_dashboard(self, local_path: str):
         """
-        Upload a dashboard markdown file to R2 alongside the parquet outputs.
+        Upload a single dashboard file to R2.
 
-        The file lands at analytics/bedrock/<job_id>/dashboard/index.md and is
-        rendered by the Bedrock Dash framework at request time — no Evidence
-        build step needed.
+        The file lands at analytics/bedrock/<job_id>/dashboard/<filename> and is
+        rendered by the Bedrock Dash framework at request time.
 
-        Typically called at the end of analysis.py:
-            job.write_dashboard("dashboard/index.md")
+        For multi-page dashboards, call this for each file or use
+        write_dashboard_dir() to upload the entire directory at once.
 
         Args:
-            local_path: path to the .md file relative to the analysis repo root
+            local_path: path to the file relative to the repo root
+                        (e.g. "dashboard/index.md")
         """
         import os.path as _osp
 
@@ -192,12 +218,88 @@ class BedrockJob:
             print(f"  [warn] dashboard file not found: {local_path}", flush=True)
             return
 
-        # Upload as dashboard/index.md (the presign endpoint scopes to data/ prefix,
-        # so we use the dashboard/ prefix via the filename)
         dest = "dashboard/" + _osp.basename(local_path)
         presigned_url = self._presign_upload(dest)
         self._upload_file(local_path, presigned_url)
         print(f"  wrote {dest} ({_osp.getsize(local_path)} bytes)", flush=True)
+
+    def write_dashboard_dir(self, dir_path: str = "dashboard"):
+        """
+        Upload all files in a dashboard directory to R2.
+
+        Walks the directory and uploads every file, preserving the flat
+        structure under analytics/bedrock/<job_id>/dashboard/.
+
+        Also generates and uploads _manifest.json listing all pages with
+        their frontmatter (title, sidebar_position) so the Bedrock Dash
+        router can build a sidebar without extra server round-trips.
+
+        Typical repo layout:
+            dashboard/
+              index.md          ← home page (required)
+              trends.md         ← additional page
+              _queries.md       ← shared queries (available on all pages)
+
+        Usage:
+            job.write_dashboard_dir()           # defaults to "dashboard/"
+            job.write_dashboard_dir("my_dash")  # custom directory name
+
+        Args:
+            dir_path: path to the dashboard directory relative to repo root
+        """
+        import os
+        import re
+
+        if not os.path.isdir(dir_path):
+            print(f"  [warn] dashboard dir not found: {dir_path}", flush=True)
+            return
+
+        pages = []
+        count = 0
+        for filename in sorted(os.listdir(dir_path)):
+            filepath = os.path.join(dir_path, filename)
+            if not os.path.isfile(filepath):
+                continue
+            dest = f"dashboard/{filename}"
+            presigned_url = self._presign_upload(dest)
+            self._upload_file(filepath, presigned_url)
+            size = os.path.getsize(filepath)
+            print(f"  wrote {dest} ({size} bytes)", flush=True)
+            count += 1
+
+            # Extract frontmatter for manifest (pages only, skip _queries.md)
+            if filename.endswith(".md") and not filename.startswith("_"):
+                slug = filename.replace(".md", "")
+                title = slug.replace("_", " ").replace("-", " ").title()
+                position = 99
+                try:
+                    with open(filepath, "r") as f:
+                        content = f.read(500)  # frontmatter is at the top
+                    fm_match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+                    if fm_match:
+                        for line in fm_match.group(1).split("\n"):
+                            if line.startswith("title:"):
+                                title = line.split(":", 1)[1].strip()
+                            if line.startswith("sidebar_position:"):
+                                position = int(line.split(":", 1)[1].strip())
+                except Exception:
+                    pass
+                pages.append({"slug": slug, "title": title, "position": position})
+
+        # Upload page manifest for the router
+        if len(pages) > 1:
+            pages.sort(key=lambda p: p["position"])
+            manifest = json.dumps({"pages": pages})
+            manifest_path = os.path.join(dir_path, "_manifest.json")
+            with open(manifest_path, "w") as f:
+                f.write(manifest)
+            dest = "dashboard/_manifest.json"
+            presigned_url = self._presign_upload(dest)
+            self._upload_file(manifest_path, presigned_url)
+            os.remove(manifest_path)
+            print(f"  wrote {dest} ({len(pages)} pages)", flush=True)
+
+        print(f"  dashboard: {count} files uploaded", flush=True)
 
     def fetch_url_to_home(self, url: str, filename: str = None, max_bytes: int = 10 * 1024 * 1024 * 1024) -> str:
         """
